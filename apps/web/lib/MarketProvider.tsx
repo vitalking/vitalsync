@@ -13,6 +13,10 @@ import {
 import type { ClientMessage, ServerMessage, Symbol } from '@vitalsync/shared';
 import { INITIAL_SYMBOL, WS_URL } from './config';
 import { MarketStore, type DisplaySnapshot } from './marketStore';
+import { BinanceDirectSource } from './binanceDirect';
+
+/** Origen de datos activo. */
+export type DataMode = 'connecting' | 'server' | 'direct';
 
 interface MarketContextValue {
   store: MarketStore;
@@ -22,6 +26,9 @@ interface MarketContextValue {
 
 const MarketContext = createContext<MarketContextValue | null>(null);
 
+/** Tiempo que esperamos al servidor antes de caer a Binance directo (ms). */
+const SERVER_WAIT_MS = 5000;
+
 export function MarketProvider({ children }: { children: React.ReactNode }) {
   const storeRef = useRef<MarketStore | null>(null);
   if (!storeRef.current) storeRef.current = new MarketStore(INITIAL_SYMBOL);
@@ -29,31 +36,61 @@ export function MarketProvider({ children }: { children: React.ReactNode }) {
 
   const [symbol, setSymbolState] = useState<Symbol>(INITIAL_SYMBOL);
   const wsRef = useRef<WebSocket | null>(null);
+  const directRef = useRef<BinanceDirectSource | null>(null);
   const symbolRef = useRef<Symbol>(symbol);
-  const reconnectRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const attemptRef = useRef(0);
+  const watchdogRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const modeRef = useRef<DataMode>('connecting');
   const closedRef = useRef(false);
 
-  const send = useCallback((msg: ClientMessage) => {
+  const clearWatchdog = () => {
+    if (watchdogRef.current) clearTimeout(watchdogRef.current);
+    watchdogRef.current = null;
+  };
+
+  const stopServer = useCallback(() => {
     const ws = wsRef.current;
-    if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(msg));
+    if (ws) {
+      ws.onopen = ws.onmessage = ws.onclose = ws.onerror = null;
+      try {
+        ws.close();
+      } catch {
+        /* noop */
+      }
+      wsRef.current = null;
+    }
   }, []);
 
-  const connect = useCallback(() => {
+  const stopDirect = useCallback(() => {
+    directRef.current?.stop();
+    directRef.current = null;
+  }, []);
+
+  // Conexión directa a Binance (fallback).
+  const startDirect = useCallback(() => {
+    if (closedRef.current || modeRef.current === 'direct') return;
+    modeRef.current = 'direct';
+    clearWatchdog();
+    stopServer();
+    const src = new BinanceDirectSource(store, symbolRef.current);
+    directRef.current = src;
+    src.start();
+  }, [store, stopServer]);
+
+  // Conexión al servidor agregador.
+  const connectServer = useCallback(() => {
     if (closedRef.current) return;
     let ws: WebSocket;
     try {
       ws = new WebSocket(WS_URL);
     } catch {
-      scheduleReconnect();
+      startDirect();
       return;
     }
     wsRef.current = ws;
 
     ws.onopen = () => {
-      attemptRef.current = 0;
-      store.setConnected(true);
-      send({ type: 'subscribe', symbol: symbolRef.current });
+      const msg: ClientMessage = { type: 'subscribe', symbol: symbolRef.current };
+      ws.send(JSON.stringify(msg));
     };
 
     ws.onmessage = (event) => {
@@ -63,36 +100,49 @@ export function MarketProvider({ children }: { children: React.ReactNode }) {
       } catch {
         return;
       }
+      // Primer dato real del servidor: lo adoptamos como fuente.
+      if (modeRef.current !== 'server') {
+        modeRef.current = 'server';
+        clearWatchdog();
+        stopDirect();
+        store.setConnected(true);
+      }
       store.apply(msg);
     };
 
     ws.onclose = () => {
-      store.setConnected(false);
-      if (!closedRef.current) scheduleReconnect();
+      if (closedRef.current) return;
+      // Si nunca llegamos a recibir datos del servidor, vamos a Binance directo.
+      if (modeRef.current !== 'server') startDirect();
+      else store.setConnected(false);
     };
 
     ws.onerror = () => {
-      ws.close();
+      try {
+        ws.close();
+      } catch {
+        /* noop */
+      }
     };
 
-    function scheduleReconnect() {
-      if (reconnectRef.current) clearTimeout(reconnectRef.current);
-      const delay = Math.min(1000 * 2 ** attemptRef.current, 15000);
-      attemptRef.current++;
-      reconnectRef.current = setTimeout(connect, delay);
-    }
-  }, [send, store]);
+    // Vigilante: si el servidor no responde a tiempo, usamos Binance directo.
+    clearWatchdog();
+    watchdogRef.current = setTimeout(() => {
+      if (modeRef.current !== 'server') startDirect();
+    }, SERVER_WAIT_MS);
+  }, [startDirect, stopDirect, store]);
 
-  // Conexión + bucle de notificación (una sola vez).
+  // Arranque (una sola vez).
   useEffect(() => {
     closedRef.current = false;
     store.startNotifyLoop();
-    connect();
+    connectServer();
     return () => {
       closedRef.current = true;
       store.stopNotifyLoop();
-      if (reconnectRef.current) clearTimeout(reconnectRef.current);
-      wsRef.current?.close();
+      clearWatchdog();
+      stopServer();
+      stopDirect();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -100,13 +150,16 @@ export function MarketProvider({ children }: { children: React.ReactNode }) {
   const setSymbol = useCallback(
     (next: Symbol) => {
       if (next === symbolRef.current) return;
-      send({ type: 'unsubscribe', symbol: symbolRef.current });
       symbolRef.current = next;
       store.reset(next);
+      // Reiniciamos las fuentes para el nuevo símbolo.
+      stopDirect();
+      stopServer();
+      modeRef.current = 'connecting';
       setSymbolState(next);
-      send({ type: 'subscribe', symbol: next });
+      connectServer();
     },
-    [send, store],
+    [connectServer, stopDirect, stopServer, store],
   );
 
   const value = useMemo<MarketContextValue>(
