@@ -28,6 +28,8 @@ export class OrderBookManager {
   private lastUpdateId = 0;
   private buffer: DepthDiff[] = [];
   private synced = false;
+  private lastResyncAt = 0;
+  private syncing = false;
   private fetchSnapshot: () => Promise<{
     lastUpdateId: number;
     bids: [string, string][];
@@ -56,50 +58,78 @@ export class OrderBookManager {
   /** Inicia la sincronización: pide snapshot y procesa el buffer acumulado. */
   async sync(): Promise<void> {
     this.synced = false;
-    const snap = await this.fetchSnapshot();
-    this.bids.clear();
-    this.asks.clear();
-    for (const [p, q] of snap.bids) this.setLevel(this.bids, p, q);
-    for (const [p, q] of snap.asks) this.setLevel(this.asks, p, q);
-    this.lastUpdateId = snap.lastUpdateId;
+    this.syncing = true;
+    try {
+      const snap = await this.fetchSnapshot();
+      this.bids.clear();
+      this.asks.clear();
+      for (const [p, q] of snap.bids) this.setLevel(this.bids, p, q);
+      for (const [p, q] of snap.asks) this.setLevel(this.asks, p, q);
+      this.lastUpdateId = snap.lastUpdateId;
 
-    // Procesar eventos almacenados que sean posteriores al snapshot.
-    const pending = this.buffer.filter((e) => e.u >= this.lastUpdateId);
-    this.buffer = [];
-    let first = true;
-    for (const ev of pending) {
-      if (first) {
-        if (ev.U <= this.lastUpdateId && this.lastUpdateId <= ev.u) {
-          this.apply(ev);
-          first = false;
+      // Procesar eventos almacenados que sean posteriores al snapshot.
+      const pending = this.buffer.filter((e) => e.u >= this.lastUpdateId);
+      this.buffer = [];
+      let first = true;
+      for (const ev of pending) {
+        if (first) {
+          if (ev.U <= this.lastUpdateId && this.lastUpdateId <= ev.u) {
+            this.apply(ev);
+            first = false;
+          }
+          // si no encaja todavía, lo saltamos (es anterior)
+          continue;
         }
-        // si no encaja todavía, lo saltamos (es anterior)
-        continue;
+        this.apply(ev);
       }
-      this.apply(ev);
+      this.synced = true;
+      log.debug(`[book ${this.symbol}] sincronizado en updateId ${this.lastUpdateId}`);
+    } finally {
+      this.syncing = false;
     }
-    this.synced = true;
-    log.debug(`[book ${this.symbol}] sincronizado en updateId ${this.lastUpdateId}`);
   }
 
-  /** Procesa un evento diff del stream. */
+  /**
+   * Procesa un evento diff del stream.
+   *
+   * Usamos la ventana U/u (estándar y robusta) en lugar de exigir pu == lastUpdateId:
+   *  - Evento totalmente antiguo (u <= lastUpdateId): ya aplicado, se ignora.
+   *  - Hueco real (U > lastUpdateId + 1): faltan actualizaciones -> re-sincronizar.
+   *  - En cualquier otro caso (contiguo o solapado): aplicar.
+   *
+   * Esto evita la "tormenta de re-sincronización" que saturaba el CPU pidiendo
+   * el snapshot de 1000 niveles muchas veces por segundo.
+   */
   onDiff(ev: DepthDiff): void {
     if (!this.synced) {
       this.buffer.push(ev);
-      // Evitar crecimiento ilimitado mientras llega el snapshot.
-      if (this.buffer.length > 1000) this.buffer.shift();
+      if (this.buffer.length > 2000) this.buffer.shift();
       return;
     }
-    // Verificación de continuidad para futuros: pu debe igualar el último u.
-    if (ev.pu !== this.lastUpdateId) {
+
+    // Evento completamente antiguo: sus cambios ya están aplicados.
+    if (ev.u <= this.lastUpdateId) return;
+
+    // Hueco real en la secuencia: nos faltan eventos intermedios.
+    if (ev.U > this.lastUpdateId + 1) {
+      const now = Date.now();
+      // Throttle: como máximo una re-sincronización por segundo. Mientras tanto
+      // aplicamos el evento para no congelar el libro ni saturar el REST.
+      if (now - this.lastResyncAt < 1000 || this.syncing) {
+        this.apply(ev);
+        return;
+      }
+      this.lastResyncAt = now;
       log.warn(
-        `[book ${this.symbol}] cadena rota (pu=${ev.pu}, esperado=${this.lastUpdateId}); re-sincronizando`,
+        `[book ${this.symbol}] hueco detectado (U=${ev.U} > esperado=${this.lastUpdateId + 1}); re-sincronizando`,
       );
       this.synced = false;
       this.buffer = [ev];
       void this.sync().catch((e) => log.error(`[book ${this.symbol}] resync falló`, e));
       return;
     }
+
+    // Contiguo o solapado: aplicar normalmente.
     this.apply(ev);
   }
 
