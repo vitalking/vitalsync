@@ -1,0 +1,154 @@
+.header {
+  display: flex;
+  align-items: center;
+  gap: 20px;
+  padding: 0 16px;
+  height: var(--vs-header-height);
+  background: var(--vs-bg-deep);
+  border-bottom: 1px solid var(--vs-border-divider);
+  overflow-x: auto;
+  white-space: nowrap;
+}
+
+.brand {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+}
+.logoMark {
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  border: 2px solid var(--vs-accent-primary);
+  position: relative;
+  box-shadow: 0 0 12px rgba(0, 229, 255, 0.5);
+}
+.logoMark::after {
+  content: '';
+  position: absolute;
+  inset: 3px;
+  background: var(--vs-accent-primary);
+  border-radius: 50%;
+  animation: vs-pulse 2.4s ease-in-out infinite;
+}
+.logoText {
+  font-weight: 800;
+  letter-spacing: 0.22em;
+  font-size: 14px;
+  color: var(--vs-text-primary);
+}
+.version {
+  font-size: 9px;
+  font-weight: 700;
+  color: var(--vs-accent-primary);
+  border: 1px solid var(--vs-border-active);
+  border-radius: 3px;
+  padding: 1px 4px;
+}
+
+.symbolSelect {
+  background: var(--vs-bg-surface);
+  color: var(--vs-text-primary);
+  border: 1px solid var(--vs-border-divider);
+  border-radius: var(--vs-radius-md);
+  padding: 6px 10px;
+  font-size: 12px;
+  font-weight: 600;
+  font-family: var(--vs-font-mono);
+  cursor: pointer;
+  flex-shrink: 0;
+}
+.symbolSelect:focus {
+  outline: none;
+  border-color: var(--vs-border-active);
+}
+
+.priceBlock {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  flex-shrink: 0;
+}
+.price {
+  font-size: 22px;
+  font-weight: 700;
+  transition: color 0.18s ease;
+}
+.change {
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.metrics {
+  display: flex;
+  align-items: center;
+  gap: 22px;
+  margin-left: auto;
+}
+.metric {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.metricLabel {
+  font-size: 9px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--vs-text-muted);
+}
+.metricValue {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--vs-text-primary);
+}
+
+.status {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-shrink: 0;
+}
+.dataBadge {
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.1em;
+  padding: 3px 7px;
+  border-radius: 3px;
+}
+.badgeLive {
+  color: var(--vs-accent-tertiary);
+  background: rgba(0, 191, 165, 0.12);
+  border: 1px solid rgba(0, 191, 165, 0.3);
+}
+.badgeSim {
+  color: var(--vs-accent-warning);
+  background: rgba(255, 109, 0, 0.12);
+  border: 1px solid rgba(255, 109, 0, 0.3);
+}
+.conn {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  font-weight: 600;
+}
+.connDot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+}
+.connOn {
+  color: var(--vs-accent-tertiary);
+}
+.connOn .connDot {
+  background: var(--vs-accent-tertiary);
+  box-shadow: 0 0 8px var(--vs-accent-tertiary);
+  animation: vs-pulse 2s ease-in-out infinite;
+}
+.connOff {
+  color: var(--vs-accent-warning);
+}
+.connOff .connDot {
+  background: var(--vs-accent-warning);
+}

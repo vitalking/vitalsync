@@ -1,0 +1,23 @@
+{
+  "name": "vitalsync",
+  "version": "2.0.0",
+  "private": true,
+  "description": "VITALSYNC v2 — Dashboard de mercado en tiempo real para Binance Futures (precio, order book, liquidaciones, funding, OI).",
+  "workspaces": [
+    "packages/*",
+    "apps/*"
+  ],
+  "scripts": {
+    "dev": "npm run dev --workspace=apps/server & npm run dev --workspace=apps/web",
+    "dev:web": "npm run dev --workspace=apps/web",
+    "dev:server": "npm run dev --workspace=apps/server",
+    "build": "npm run build --workspace=packages/shared && npm run build --workspace=apps/server && npm run build --workspace=apps/web",
+    "build:web": "npm run build --workspace=apps/web",
+    "build:server": "npm run build --workspace=apps/server",
+    "start:server": "npm run start --workspace=apps/server",
+    "typecheck": "npm run typecheck --workspaces --if-present"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
