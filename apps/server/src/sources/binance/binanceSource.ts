@@ -1,41 +1,40 @@
 import WebSocket from 'ws';
-import type { Symbol } from '@vitalsync/shared';
+import type { BookLevel, OrderBook, Symbol } from '@vitalsync/shared';
 import { config } from '../../config.js';
 import { log } from '../../logger.js';
 import { TypedEmitter, type DataSource } from '../types.js';
-import { OrderBookManager } from './orderBookManager.js';
 
 /**
  * Fuente de datos real conectada a Binance USD-M Futures mediante un único
- * "combined stream" por símbolo: aggTrade, markPrice, depth, forceOrder y ticker.
- * Mantiene el order book local y hace polling del Open Interest por REST.
+ * "combined stream" por símbolo: aggTrade, markPrice, depth parcial, forceOrder
+ * y ticker. Hace polling del Open Interest por REST.
+ *
+ * Usamos el stream de PROFUNDIDAD PARCIAL (`@depth20@500ms`), que entrega el
+ * top-20 del libro ya listo cada 500ms. Así evitamos el snapshot REST + gestión
+ * de diffs + re-sincronización, que consumían demasiada CPU en instancias
+ * pequeñas (plan gratuito de 0.1 vCPU).
  */
 export class BinanceSource extends TypedEmitter implements DataSource {
   readonly live = true;
   private ws: WebSocket | null = null;
-  private book: OrderBookManager;
   private oiTimer: NodeJS.Timeout | null = null;
-  private bookEmitTimer: NodeJS.Timeout | null = null;
   private lastPrice = 0;
+  private book: OrderBook = { bids: [], asks: [], lastUpdateId: 0 };
   private stopped = false;
   private reconnectDelay = 1000;
 
   constructor(readonly symbol: Symbol) {
     super();
-    const lower = symbol.toLowerCase();
-    this.book = new OrderBookManager(symbol, () => this.fetchDepthSnapshot(lower));
   }
 
   async start(): Promise<void> {
-    await this.connectAndSync();
+    await this.connect();
     this.startOiPolling();
-    this.startBookEmitter();
   }
 
   stop(): void {
     this.stopped = true;
     if (this.oiTimer) clearInterval(this.oiTimer);
-    if (this.bookEmitTimer) clearInterval(this.bookEmitTimer);
     this.ws?.removeAllListeners();
     this.ws?.close();
     this.ws = null;
@@ -48,14 +47,15 @@ export class BinanceSource extends TypedEmitter implements DataSource {
     const streams = [
       `${s}@aggTrade`,
       `${s}@markPrice@1s`,
-      `${s}@depth@100ms`,
+      `${s}@depth20@500ms`,
       `${s}@forceOrder`,
       `${s}@ticker`,
     ].join('/');
     return `${config.binanceWsBase}/stream?streams=${streams}`;
   }
 
-  private connectAndSync(): Promise<void> {
+  /** Conecta y resuelve cuando el WebSocket está abierto. */
+  private connect(): Promise<void> {
     return new Promise((resolve, reject) => {
       let settled = false;
       const timeout = setTimeout(() => {
@@ -68,24 +68,14 @@ export class BinanceSource extends TypedEmitter implements DataSource {
 
       this.ws = new WebSocket(this.streamUrl());
 
-      this.ws.on('open', async () => {
-        log.info(`[binance ${this.symbol}] WS abierto, sincronizando libro...`);
-        this.book.reset();
-        try {
-          await this.book.sync();
-          if (!settled) {
-            settled = true;
-            clearTimeout(timeout);
-            this.reconnectDelay = 1000;
-            this.emitTyped('ready');
-            resolve();
-          }
-        } catch (err) {
-          if (!settled) {
-            settled = true;
-            clearTimeout(timeout);
-            reject(err as Error);
-          }
+      this.ws.on('open', () => {
+        log.info(`[binance ${this.symbol}] WebSocket abierto`);
+        if (!settled) {
+          settled = true;
+          clearTimeout(timeout);
+          this.reconnectDelay = 1000;
+          this.emitTyped('ready');
+          resolve();
         }
       });
 
@@ -111,13 +101,13 @@ export class BinanceSource extends TypedEmitter implements DataSource {
 
   private reconnect(): void {
     if (this.stopped) return;
-    this.connectAndSync().catch((e) =>
-      log.error(`[binance ${this.symbol}] reconexión falló:`, (e as Error).message),
+    this.connect().catch((e) =>
+      log.warn(`[binance ${this.symbol}] reconexión falló:`, (e as Error).message),
     );
   }
 
   private onMessage(raw: WebSocket.RawData): void {
-    let parsed: { stream: string; data: Record<string, unknown> };
+    let parsed: { data?: Record<string, unknown> };
     try {
       parsed = JSON.parse(raw.toString());
     } catch {
@@ -134,13 +124,7 @@ export class BinanceSource extends TypedEmitter implements DataSource {
         this.onMarkPrice(d);
         break;
       case 'depthUpdate':
-        this.book.onDiff({
-          U: d.U as number,
-          u: d.u as number,
-          pu: d.pu as number,
-          b: d.b as [string, string][],
-          a: d.a as [string, string][],
-        });
+        this.onDepth(d);
         break;
       case 'forceOrder':
         this.onLiquidation(d);
@@ -160,6 +144,21 @@ export class BinanceSource extends TypedEmitter implements DataSource {
       m: Boolean(d.m),
       t: (d.T as number) ?? Date.now(),
     });
+  }
+
+  private onDepth(d: Record<string, unknown>): void {
+    // El stream de profundidad parcial entrega el top-N como instantánea
+    // absoluta (no diffs): lo usamos directamente.
+    const toLevels = (arr: unknown): BookLevel[] =>
+      Array.isArray(arr)
+        ? (arr as [string, string][]).map(([p, q]) => [parseFloat(p), parseFloat(q)] as BookLevel)
+        : [];
+    this.book = {
+      bids: toLevels(d.b),
+      asks: toLevels(d.a),
+      lastUpdateId: (d.u as number) ?? Date.now(),
+    };
+    this.emitTyped('book', this.book);
   }
 
   private onMarkPrice(d: Record<string, unknown>): void {
@@ -200,17 +199,6 @@ export class BinanceSource extends TypedEmitter implements DataSource {
     );
   }
 
-  // -------------------------------------------------------------------------
-
-  private startBookEmitter(): void {
-    // Emitimos el libro a intervalo fijo (el agregador también puede throttlear).
-    this.bookEmitTimer = setInterval(() => {
-      if (this.book.isSynced()) {
-        this.emitTyped('book', this.book.snapshot(config.bookDepth));
-      }
-    }, config.bookBroadcastIntervalMs);
-  }
-
   private startOiPolling(): void {
     const poll = async () => {
       try {
@@ -231,21 +219,5 @@ export class BinanceSource extends TypedEmitter implements DataSource {
     };
     void poll();
     this.oiTimer = setInterval(poll, config.oiPollIntervalMs);
-  }
-
-  private async fetchDepthSnapshot(
-    lowerSymbol: string,
-  ): Promise<{ lastUpdateId: number; bids: [string, string][]; asks: [string, string][] }> {
-    const res = await fetch(
-      `${config.binanceRestBase}/fapi/v1/depth?symbol=${lowerSymbol.toUpperCase()}&limit=1000`,
-    );
-    if (!res.ok) {
-      throw new Error(`Snapshot de profundidad falló: HTTP ${res.status}`);
-    }
-    return (await res.json()) as {
-      lastUpdateId: number;
-      bids: [string, string][];
-      asks: [string, string][];
-    };
   }
 }
