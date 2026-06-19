@@ -1,0 +1,22 @@
+.wrap {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+  width: 100%;
+}
+.canvas {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+.label {
+  position: absolute;
+  top: 10px;
+  left: 14px;
+  font-size: 10px;
+  letter-spacing: 0.12em;
+  color: var(--vs-text-muted);
+  font-weight: 600;
+  z-index: 2;
+  pointer-events: none;
+}
